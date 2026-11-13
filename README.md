@@ -2,6 +2,13 @@
 
 An independent Streamlit tool for analysing frequency-sweep workbook data, including resistance, reactance, impedance and X/R visualisation. It includes interactive case selection and chart export.
 
+## Open the app
+
+- [Frequency Sweep Analyser](https://mpe-frequency-sweep.streamlit.app/)
+- [MPE Engineering Tools](https://mpe-engineering-tools.streamlit.app/) — landing page for all three dashboards.
+
+The analyser and landing page are separate public Streamlit Community Cloud apps.
+
 ## Input files
 
 Upload an Excel workbook containing R1 and X1 worksheets. R0 and X0 worksheets are optional. The analyser expects frequency values in the first column and case data in the remaining columns. The X/R gradient is visual only and does not alter the plotted data.
@@ -16,8 +23,9 @@ Create the dedicated Conda environment and start the app from this repository di
     conda activate mpe-frequency-sweep
     streamlit run fs_sweep_app_spline.py
 
-Run Python tests with pytest. The browser-side contract checks use Node.js:
+Run Python tests and browser-side JavaScript contract checks with:
 
+    python -m pytest -q
     node --test tests/test_browser_contracts.js
 
 ## Review and limitations
