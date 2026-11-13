@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+
+# Local/session-only agent state.
+CONTINUITY.md
+
+# Local research inputs, not app runtime.
+Selection_metods/
+
+# Local user data/exports.
+*.xlsx
+*.xlsm
+*.xls
+~$*.xls*
+*.png
+
+# Local Graphify graph, reports, and extraction cache.
+graphify-out/
+
+!assets/mpe_logo.png
+!assets/mpe_app_icon.png
+
+.pytest-temp/

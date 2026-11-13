@@ -1,0 +1,936 @@
+const CASE_UI_API_GLOBAL = "__fsCaseUiApi";
+const RX_GRADIENT_STATE_GLOBAL = "__fsRxGradientState";
+const RX_GRADIENT_STRENGTH_GLOBAL = "__fsRxGradientStrength";
+const RX_GRADIENT_CONTROLLER_GLOBAL = "__fsRxGradientController";
+const RX_GRADIENT_CHANGED_EVENT = "fsRxGradientChanged";
+const RX_GRADIENT_CONTROLLER_READY_EVENT = "fsRxGradientControllerReady";
+const RX_GRADIENT_IMAGE_NAME = "__fs_rx_gradient__";
+const RX_GRADIENT_STRENGTH_MIN = 50;
+const RX_GRADIENT_STRENGTH_MAX = 250;
+const RX_GRADIENT_STRENGTH_DEFAULT = 160;
+
+function sendToStreamlit(type, payload) {
+  try {
+    window.parent.postMessage(
+      {
+        isStreamlitMessage: true,
+        type,
+        ...(payload || {}),
+      },
+      "*",
+    );
+  } catch (e) {
+    debugWarn("sendToStreamlit", e);
+  }
+}
+
+let latestArgs = {};
+let fixedExportSize = true;
+let rxGradientEnabled = true;
+let rxGradientStateKey = "";
+let rxGradientStrength = RX_GRADIENT_STRENGTH_DEFAULT;
+
+function debugEnabled() {
+  try {
+    return Boolean(latestArgs && latestArgs.debug_log);
+  } catch (e) {
+    return false;
+  }
+}
+
+function debugWarn(scope, err) {
+  if (!debugEnabled()) return;
+  try {
+    // eslint-disable-next-line no-console
+    console.warn(`[fs-export-button] ${scope}`, err);
+  } catch (e) {
+    // Debug logging must never affect export behavior.
+  }
+}
+
+function argValue(name) {
+  const contract = latestArgs && latestArgs.export_contract && typeof latestArgs.export_contract === "object"
+    ? latestArgs.export_contract
+    : {};
+  return Object.prototype.hasOwnProperty.call(contract, name) ? contract[name] : null;
+}
+
+function asNumber(name, fallback) {
+  const v = Number(argValue(name));
+  return Number.isFinite(v) ? v : Number(fallback);
+}
+
+function asString(name, fallback) {
+  const v = argValue(name);
+  if (v == null) return String(fallback);
+  return String(v);
+}
+
+function asBool(name, fallback) {
+  const v = argValue(name);
+  if (v == null) return Boolean(fallback);
+  if (typeof v === "boolean") return v;
+  const txt = String(v).trim().toLowerCase();
+  if (["true", "1", "yes", "y"].includes(txt)) return true;
+  if (["false", "0", "no", "n"].includes(txt)) return false;
+  return Boolean(fallback);
+}
+
+function parentRoot() {
+  return window.parent || window;
+}
+
+function gradientStateStore() {
+  const root = parentRoot();
+  if (!root[RX_GRADIENT_STATE_GLOBAL] || typeof root[RX_GRADIENT_STATE_GLOBAL] !== "object") {
+    root[RX_GRADIENT_STATE_GLOBAL] = {};
+  }
+  return root[RX_GRADIENT_STATE_GLOBAL];
+}
+
+function normalizeRxGradientStrength(value) {
+  const parsed = Number(value);
+  const fallback = Number.isFinite(parsed) ? parsed : RX_GRADIENT_STRENGTH_DEFAULT;
+  const rounded = Math.round(fallback / 10) * 10;
+  return Math.max(RX_GRADIENT_STRENGTH_MIN, Math.min(RX_GRADIENT_STRENGTH_MAX, rounded));
+}
+
+function gradientStrengthStore() {
+  const root = parentRoot();
+  if (!root[RX_GRADIENT_STRENGTH_GLOBAL] || typeof root[RX_GRADIENT_STRENGTH_GLOBAL] !== "object") {
+    root[RX_GRADIENT_STRENGTH_GLOBAL] = {};
+  }
+  return root[RX_GRADIENT_STRENGTH_GLOBAL];
+}
+
+function readRxGradientStrength(stateKey) {
+  const key = String(stateKey || "");
+  const store = gradientStrengthStore();
+  return Object.prototype.hasOwnProperty.call(store, key)
+    ? normalizeRxGradientStrength(store[key])
+    : RX_GRADIENT_STRENGTH_DEFAULT;
+}
+
+function readRxGradientState(stateKey) {
+  const key = String(stateKey || "");
+  const store = gradientStateStore();
+  return Object.prototype.hasOwnProperty.call(store, key) ? store[key] !== false : true;
+}
+
+function publishRxGradientState(stateKey, enabled, strength = rxGradientStrength) {
+  const key = String(stateKey || "");
+  const root = parentRoot();
+  const normalizedStrength = normalizeRxGradientStrength(strength);
+  gradientStateStore()[key] = Boolean(enabled);
+  gradientStrengthStore()[key] = normalizedStrength;
+  try {
+    const EventCtor = root.CustomEvent || CustomEvent;
+    root.dispatchEvent(new EventCtor(RX_GRADIENT_CHANGED_EVENT, {
+      detail: { stateKey: key, enabled: Boolean(enabled), strength: normalizedStrength },
+    }));
+  } catch (e) {
+    debugWarn("publishRxGradientState", e);
+  }
+  return normalizedStrength;
+}
+
+function escapeHtml(txt) {
+  return String(txt == null ? "" : txt)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function exportArgs() {
+  const fallbackLegendFontSize = Math.max(8, Math.round(asNumber("fallback_legend_font_size", 14)));
+  return {
+    scale: Math.max(1, Math.round(asNumber("scale", 1))),
+    fixedScale: Math.max(1, Math.round(asNumber("fixed_scale", 4))),
+    plotHeight: Math.max(1, Math.round(asNumber("plot_height", 400))),
+    fixedWidth: Math.max(1, Math.round(asNumber("fixed_width_px", 1000))),
+    fixedHeight: Math.max(1, Math.round(asNumber("fixed_height_px", 400))),
+    topMargin: Math.round(asNumber("top_margin_px", 40)),
+    bottomAxis: Math.round(asNumber("bottom_axis_px", 60)),
+    legendPad: Math.round(asNumber("legend_padding_px", 18)),
+    legendEntryWidth: Math.max(1, Math.round(asNumber("legend_entrywidth", 120))),
+    plotIndex: Math.max(0, Math.round(asNumber("plot_index", 0))),
+    stateKey: asString("state_key", ""),
+    selectedCaseLegend: asBool("selected_case_legend", false),
+    rxGradientControl: asBool("rx_gradient_control", false),
+    filename: asString("filename", "plot.png"),
+    fallbackLegendFontSize,
+    legendFontFamily: asString("legend_font_family", "Open Sans, verdana, arial, sans-serif"),
+    legendFontColor: asString("legend_font_color", "#000000"),
+    leftMarginBase: Math.max(1, Math.round(asNumber("left_margin_px", 60))),
+    rightMargin: Math.max(0, Math.round(asNumber("right_margin_px", 20))),
+    tickFontSize: Math.max(1, Math.round(asNumber("tick_font_size_px", 14))),
+    axisTitleFontSize: Math.max(1, Math.round(asNumber("axis_title_font_size_px", 16))),
+    leftMarginTickMult: asNumber("left_margin_tick_mult", 4.4),
+    leftMarginTitleMult: asNumber("left_margin_title_mult", 1.6),
+    rowHeightFactor: asNumber("export_legend_row_height_factor", 1.25),
+    sampleLineMinPx: Math.max(1, Math.round(asNumber("export_sample_line_min_px", 18))),
+    sampleLineMult: asNumber("export_sample_line_mult", 1.8),
+    sampleGapMinPx: Math.max(1, Math.round(asNumber("export_sample_gap_min_px", 6))),
+    sampleGapMult: asNumber("export_sample_gap_mult", 0.6),
+    textPadMinPx: Math.max(1, Math.round(asNumber("export_text_pad_min_px", 8))),
+    textPadMult: asNumber("export_text_pad_mult", 0.8),
+    tailFontMult: asNumber("export_legend_tail_font_mult", 0.35),
+    rowYOffset: asNumber("export_legend_row_y_offset", 0.6),
+    colPaddingMaxPx: Math.max(0, Math.round(asNumber("export_col_padding_max_px", 12))),
+    colPaddingFrac: asNumber("export_col_padding_frac", 0.06),
+    fallbackColor: asString("export_fallback_color", "#444"),
+  };
+}
+
+function parentPlotContext(plotIndex) {
+  const Plotly = window.parent && window.parent.Plotly ? window.parent.Plotly : null;
+  if (!Plotly) return null;
+  const plots = window.parent && window.parent.document ? window.parent.document.querySelectorAll("div.js-plotly-plot") : null;
+  if (!plots || plots.length <= plotIndex) return null;
+  const gd = plots[plotIndex];
+  return gd ? { Plotly, gd } : null;
+}
+
+function normalizeAxisRange(rawRange) {
+  if (!Array.isArray(rawRange) || rawRange.length < 2) return null;
+  const a = Number(rawRange[0]);
+  const b = Number(rawRange[1]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  let lo = Math.min(a, b);
+  let hi = Math.max(a, b);
+  if (Math.abs(hi - lo) < 1e-12) {
+    const pad = Math.max(1, Math.abs(lo) * 0.04);
+    lo -= pad;
+    hi += pad;
+  }
+  return [lo, hi];
+}
+
+function dataAxisRange(gd, valueKey) {
+  let lo = Number.POSITIVE_INFINITY;
+  let hi = Number.NEGATIVE_INFINITY;
+  const data = gd && Array.isArray(gd.data) ? gd.data : [];
+  for (const trace of data) {
+    const source = trace && Array.isArray(trace[valueKey]) ? trace[valueKey] : [];
+    for (const raw of source) {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) continue;
+      lo = Math.min(lo, value);
+      hi = Math.max(hi, value);
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  return normalizeAxisRange([lo, hi]);
+}
+
+function visibleAxisRange(gd, axisKey, valueKey) {
+  const fullAxis = gd && gd._fullLayout && gd._fullLayout[axisKey] ? gd._fullLayout[axisKey] : null;
+  const layoutAxis = gd && gd.layout && gd.layout[axisKey] ? gd.layout[axisKey] : null;
+  const fullRange = normalizeAxisRange(fullAxis && fullAxis.range);
+  if (fullRange) return fullRange;
+  const layoutRange = normalizeAxisRange(layoutAxis && layoutAxis.range);
+  return layoutRange || dataAxisRange(gd, valueKey);
+}
+
+function rxGradientImageSource(xRange, yRange, strength = RX_GRADIENT_STRENGTH_DEFAULT) {
+  const rMin = Number(xRange[0]);
+  const rMax = Number(xRange[1]);
+  const xMin = Number(yRange[0]);
+  const xMax = Number(yRange[1]);
+  const absMin = xMin <= 0 && xMax >= 0 ? 0 : Math.min(Math.abs(xMin), Math.abs(xMax));
+  const absMax = Math.max(Math.abs(xMin), Math.abs(xMax));
+  const absSpan = Math.max(1e-12, absMax - absMin);
+  const opacityScale = normalizeRxGradientStrength(strength) / 100;
+  const warmColor = "#d45b62";
+  const stop = (offset, opacity) => (
+    `<stop offset="${Number(offset).toFixed(4)}%" stop-color="${warmColor}" stop-opacity="${Number(opacity).toFixed(3)}"/>`
+  );
+  const xStops = [0, 16.6667, 33.3333, 50, 66.6667, 83.3333, 100]
+    .map((offset) => {
+      const t = Number(offset) / 100;
+      const xValue = xMax - (t * (xMax - xMin));
+      const xNorm = Math.max(0, Math.min(1, (Math.abs(xValue) - absMin) / absSpan));
+      return stop(offset, 0.20 * opacityScale * Math.pow(xNorm, 0.70));
+    })
+    .join("");
+  const svg = [
+    '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%" viewBox="0 0 100 100">',
+    '<defs>',
+    `<linearGradient id="rx-r-strength" x1="0" y1="0" x2="1" y2="0">${stop(0, 0.14 * opacityScale)}${stop(100, 0)}</linearGradient>`,
+    `<linearGradient id="rx-x-strength" x1="0" y1="0" x2="0" y2="1">${xStops}</linearGradient>`,
+    '</defs>',
+    '<rect width="100" height="100" fill="#edf7f1"/>',
+    '<rect width="100" height="100" fill="url(#rx-r-strength)"/>',
+    '<rect width="100" height="100" fill="url(#rx-x-strength)"/>',
+  ];
+  svg.push("</svg>");
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg.join(""))}`;
+}
+
+function baseImagesForRxPlot(gd) {
+  if (!gd || typeof gd !== "object") return [];
+  try {
+    if (!Object.prototype.hasOwnProperty.call(gd, "__fsRxGradientBaseImages")) {
+      const current = gd.layout && Array.isArray(gd.layout.images) ? gd.layout.images : [];
+      gd.__fsRxGradientBaseImages = current.filter((image) => {
+        return !image || String(image.name || "") !== RX_GRADIENT_IMAGE_NAME;
+      });
+    }
+    return Array.isArray(gd.__fsRxGradientBaseImages) ? gd.__fsRxGradientBaseImages : [];
+  } catch (e) {
+    debugWarn("baseImagesForRxPlot", e);
+    return [];
+  }
+}
+
+function applyRxGradientToPlot(gd, enabled, strength = rxGradientStrength) {
+  const win = gd && gd.ownerDocument && gd.ownerDocument.defaultView ? gd.ownerDocument.defaultView : null;
+  const Plotly = win && win.Plotly ? win.Plotly : null;
+  if (!gd || !Plotly || !Plotly.relayout) return Promise.resolve(false);
+
+  const baseImages = baseImagesForRxPlot(gd);
+  if (!enabled) {
+    if (String(gd.__fsRxGradientKey || "") === "off") return Promise.resolve(true);
+    gd.__fsRxGradientKey = "off";
+    gd.__fsRxGradientImage = null;
+    try {
+      return Promise.resolve(Plotly.relayout(gd, { images: baseImages })).then(() => true);
+    } catch (e) {
+      debugWarn("applyRxGradientToPlot.off", e);
+      return Promise.resolve(false);
+    }
+  }
+
+  const xRange = visibleAxisRange(gd, "xaxis", "x");
+  const yRange = visibleAxisRange(gd, "yaxis", "y");
+  if (!xRange || !yRange) return Promise.resolve(false);
+  const normalizedStrength = normalizeRxGradientStrength(strength);
+  const key = [xRange[0], xRange[1], yRange[0], yRange[1], normalizedStrength]
+    .map((value) => Number(value).toPrecision(12))
+    .join("|");
+  if (String(gd.__fsRxGradientKey || "") === key) return Promise.resolve(true);
+
+  const image = {
+    name: RX_GRADIENT_IMAGE_NAME,
+    source: rxGradientImageSource(xRange, yRange, normalizedStrength),
+    xref: "x",
+    yref: "y",
+    x: xRange[0],
+    y: yRange[1],
+    sizex: xRange[1] - xRange[0],
+    sizey: yRange[1] - yRange[0],
+    xanchor: "left",
+    yanchor: "top",
+    sizing: "stretch",
+    opacity: 1,
+    layer: "below",
+  };
+  gd.__fsRxGradientKey = key;
+  gd.__fsRxGradientImage = image;
+  try {
+    return Promise.resolve(Plotly.relayout(gd, { images: baseImages.concat([image]) })).then(() => true);
+  } catch (e) {
+    debugWarn("applyRxGradientToPlot.on", e);
+    return Promise.resolve(false);
+  }
+}
+
+function installRxGradientController() {
+  const cfg = exportArgs();
+  if (!cfg.rxGradientControl) return;
+  const root = parentRoot();
+  root[RX_GRADIENT_CONTROLLER_GLOBAL] = {
+    applyToPlot: (gd, enabled, strength = rxGradientStrength) => (
+      applyRxGradientToPlot(gd, enabled === true, strength)
+    ),
+  };
+  try {
+    const EventCtor = root.CustomEvent || CustomEvent;
+    root.dispatchEvent(new EventCtor(RX_GRADIENT_CONTROLLER_READY_EVENT, {
+      detail: { stateKey: String(cfg.stateKey || "") },
+    }));
+  } catch (e) {
+    debugWarn("installRxGradientController", e);
+  }
+}
+
+function getSelectionApi(stateKey) {
+  try {
+    const rootWin = window.parent;
+    const apiStore = rootWin && rootWin[CASE_UI_API_GLOBAL] && typeof rootWin[CASE_UI_API_GLOBAL] === "object"
+      ? rootWin[CASE_UI_API_GLOBAL]
+      : null;
+    if (!apiStore) return null;
+    const api = apiStore[String(stateKey || "")];
+    return api && typeof api === "object" ? api : null;
+  } catch (e) {
+    debugWarn("getSelectionApi", e);
+  }
+  return null;
+}
+
+function exportableData(gd) {
+  const data = Array.isArray(gd.data) ? gd.data : [];
+  return data.map((tr) => {
+    const t = Object.assign({}, tr);
+    if (t.type === "scattergl") t.type = "scatter";
+    return t;
+  });
+}
+
+function markerColorAt(markerColor, idx, fallbackColor) {
+  if (Array.isArray(markerColor)) {
+    const v = markerColor[idx];
+    return v == null || String(v) === "" ? fallbackColor : v;
+  }
+  if (markerColor != null && String(markerColor) !== "") return markerColor;
+  return fallbackColor;
+}
+
+function markerSymbolAt(markerSymbol, idx) {
+  if (Array.isArray(markerSymbol)) return String(markerSymbol[idx] == null ? "" : markerSymbol[idx]);
+  return String(markerSymbol == null ? "" : markerSymbol);
+}
+
+function markerNumberAt(markerValue, idx, fallback) {
+  const raw = Array.isArray(markerValue) ? markerValue[idx] : markerValue;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : Number(fallback);
+}
+
+function displayNameAt(customdata, ids, idx) {
+  const fallback = Array.isArray(ids) ? String(ids[idx] == null ? "" : ids[idx]) : "";
+  if (!Array.isArray(customdata)) return fallback;
+  const cd = customdata[idx];
+  if (Array.isArray(cd)) {
+    return String(cd[1] || cd[0] || fallback);
+  }
+  if (cd && typeof cd === "object") {
+    return String(cd.display_case || cd.displayCase || cd.case_id || cd.caseId || fallback);
+  }
+  return fallback;
+}
+
+function selectedMarkerLegendItemsForData(data, fallbackColor) {
+  const seen = new Set();
+  const items = [];
+  for (const tr of data) {
+    if (!tr || !tr.marker || typeof tr.marker !== "object") continue;
+    const ids = Array.isArray(tr.ids) ? tr.ids : [];
+    const marker = tr.marker;
+    for (let i = 0; i < ids.length; i++) {
+      const symbol = markerSymbolAt(marker.symbol, i).toLowerCase();
+      if (!symbol.includes("diamond")) continue;
+      const cid = String(ids[i] || "");
+      const key = cid || `${items.length}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({
+        name: displayNameAt(tr.customdata, ids, i),
+        color: markerColorAt(marker.color, i, fallbackColor),
+      });
+    }
+  }
+  return items;
+}
+
+function visibleMarkerLegendItemsForData(data, fallbackColor) {
+  const seen = new Set();
+  const items = [];
+  for (const tr of data) {
+    if (!tr || !tr.marker || typeof tr.marker !== "object") continue;
+    const ids = Array.isArray(tr.ids) ? tr.ids : [];
+    const marker = tr.marker;
+    for (let i = 0; i < ids.length; i++) {
+      const opacity = markerNumberAt(marker.opacity, i, 1);
+      const size = markerNumberAt(marker.size, i, 1);
+      if (opacity <= 0 || size <= 0) continue;
+      const cid = String(ids[i] || "");
+      const key = cid || `${items.length}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({
+        name: displayNameAt(tr.customdata, ids, i),
+        color: markerColorAt(marker.color, i, fallbackColor),
+      });
+    }
+  }
+  return items;
+}
+
+function selectedCaseLegendItemsForData(data, cfg) {
+  if (!cfg.selectedCaseLegend || !cfg.stateKey) return [];
+  const api = getSelectionApi(cfg.stateKey);
+  if (!api || typeof api.getState !== "function") {
+    const selected = selectedMarkerLegendItemsForData(data, cfg.fallbackColor);
+    return selected.length > 0 ? selected : visibleMarkerLegendItemsForData(data, cfg.fallbackColor);
+  }
+  const st = api.getState();
+  const selectedRows = st && Array.isArray(st.selectedRows) ? st.selectedRows : [];
+  if (selectedRows.length === 0) {
+    const selected = selectedMarkerLegendItemsForData(data, cfg.fallbackColor);
+    return selected.length > 0 ? selected : visibleMarkerLegendItemsForData(data, cfg.fallbackColor);
+  }
+
+  const colorByCase = new Map();
+  for (const tr of data) {
+    if (!tr || !Array.isArray(tr.ids)) continue;
+    const marker = tr.marker && typeof tr.marker === "object" ? tr.marker : {};
+    const markerColor = marker.color;
+    for (let i = 0; i < tr.ids.length; i++) {
+      const cid = String(tr.ids[i] || "");
+      if (!cid || colorByCase.has(cid)) continue;
+      colorByCase.set(cid, markerColorAt(markerColor, i, cfg.fallbackColor));
+    }
+  }
+
+  const seen = new Set();
+  const items = [];
+  for (const row of selectedRows) {
+    const cid = String(row && row.caseId != null ? row.caseId : "");
+    if (!cid || seen.has(cid) || (row && row.hidden === true)) continue;
+    seen.add(cid);
+    const display = String(row && row.displayCase ? row.displayCase : cid);
+    items.push({ name: display, color: colorByCase.get(cid) || cfg.fallbackColor });
+  }
+  if (items.length > 0) return items;
+  const selected = selectedMarkerLegendItemsForData(data, cfg.fallbackColor);
+  return selected.length > 0 ? selected : visibleMarkerLegendItemsForData(data, cfg.fallbackColor);
+}
+
+function legendItemsForData(data, fallbackColor) {
+  const items = [];
+  for (const tr of data) {
+    if (tr && tr.showlegend === false) continue;
+    const name = tr && tr.name ? String(tr.name) : "";
+    if (!name) continue;
+    const color =
+      (tr.line && tr.line.color) ? tr.line.color :
+      (tr.marker && tr.marker.color) ? tr.marker.color :
+      (tr.meta && tr.meta.legend_color) ? tr.meta.legend_color :
+      fallbackColor;
+    items.push({ name, color });
+  }
+  return items;
+}
+
+function removeExportOnlyControls(layout) {
+  if (!layout || typeof layout !== "object") return;
+  // Scatter uses the web slider for selection only; PNG export needs clean plot + manual legend.
+  layout.sliders = [];
+  delete layout.sliders;
+}
+
+function measureMaxLegendTextWidth(items, fontSize, fontFamily) {
+  let maxTextW = 0;
+  try {
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (ctx) {
+      ctx.font = `${fontSize}px ${fontFamily}`;
+      for (const it of items) {
+        const w = ctx.measureText(it.name).width || 0;
+        if (w > maxTextW) maxTextW = w;
+      }
+    }
+  } catch (e) {
+    debugWarn("measureMaxLegendTextWidth", e);
+  }
+  return maxTextW;
+}
+
+function resetExportContainer() {
+  try {
+    const container = document.getElementById("exp-plot");
+    if (container) {
+      container.innerHTML = "";
+      container.style.width = "1px";
+      container.style.height = "1px";
+    }
+  } catch (e) {
+    debugWarn("resetExportContainer", e);
+  }
+}
+
+function render() {
+  const root = document.getElementById("app");
+  if (!root) return;
+  const cfg = exportArgs();
+  if (cfg.rxGradientControl) {
+    rxGradientStateKey = String(cfg.stateKey || "");
+    rxGradientEnabled = readRxGradientState(rxGradientStateKey);
+    rxGradientStrength = readRxGradientStrength(rxGradientStateKey);
+    gradientStateStore()[rxGradientStateKey] = rxGradientEnabled;
+    gradientStrengthStore()[rxGradientStateKey] = rxGradientStrength;
+    installRxGradientController();
+  }
+  const buttonLabel = asString("button_label", "Export");
+  const safeButtonLabel = escapeHtml(buttonLabel);
+  const safeHeaderTitle = escapeHtml(asString("header_title", ""));
+  root.innerHTML = `
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+      #exp-root {
+        width: 100%;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      #exp-title {
+        min-width: 0;
+        flex: 1 1 auto;
+        color: #2b3445;
+        font-family: "Open Sans", verdana, arial, sans-serif;
+        font-size: 16px;
+        font-weight: 700;
+        line-height: 1.2;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #exp-btn {
+        width: auto;
+        flex: 0 0 auto;
+        min-width: 86px;
+        min-height: 24px;
+        padding: 2px 9px;
+        font-size: 11px;
+        font-family: "Open Sans", verdana, arial, sans-serif;
+        font-weight: 600;
+        color: #243047;
+        background: #fff;
+        border: 1px solid #b8c7dd;
+        border-radius: 8px;
+        cursor: pointer;
+        white-space: nowrap;
+        line-height: 1.15;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #exp-btn:hover:not(:disabled) {
+        background: #f4f8ff;
+        border-color: #91a9ca;
+      }
+      #exp-btn:focus-visible {
+        outline: 2px solid #2f6fda;
+        outline-offset: 2px;
+      }
+      #exp-btn:disabled {
+        color: #8a95a8;
+        background: #eef2f7;
+        border-color: #d5deeb;
+        cursor: wait;
+      }
+      #exp-actions {
+        flex: 0 0 auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      #exp-fixed {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: #4c566a;
+        font-family: "Open Sans", verdana, arial, sans-serif;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      #exp-fixed-size {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        accent-color: #1f77d0;
+      }
+      #exp-fixed-size:focus-visible {
+        outline: 2px solid #2f6fda;
+        outline-offset: 2px;
+      }
+      #exp-rx-gradient {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        color: #4c566a;
+        font-family: "Open Sans", verdana, arial, sans-serif;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      #exp-rx-gradient-input {
+        width: 14px;
+        height: 14px;
+        margin: 0;
+        accent-color: #1f77d0;
+      }
+      #exp-rx-gradient-input:focus-visible {
+        outline: 2px solid #2f6fda;
+        outline-offset: 2px;
+      }
+      #exp-rx-gradient-strength {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        color: #4c566a;
+        font-family: "Open Sans", verdana, arial, sans-serif;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      #exp-rx-gradient-strength-input {
+        width: 82px;
+        height: 14px;
+        margin: 0;
+        accent-color: #1f77d0;
+        cursor: pointer;
+      }
+      #exp-rx-gradient-strength-input:focus-visible {
+        outline: 2px solid #2f6fda;
+        outline-offset: 2px;
+      }
+      #exp-rx-gradient-strength-value {
+        min-width: 34px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      #exp-plot {
+        width: 1px;
+        height: 1px;
+        position: absolute;
+        left: -99999px;
+        top: -99999px;
+      }
+    </style>
+    <div id="exp-root">
+      ${safeHeaderTitle ? `<div id="exp-title" title="${safeHeaderTitle}">${safeHeaderTitle}</div>` : ""}
+      <div id="exp-actions">
+        ${cfg.rxGradientControl ? `
+          <label id="exp-rx-gradient" title="Visual background: lower R and higher |X| are emphasized.">
+            <input id="exp-rx-gradient-input" type="checkbox" ${rxGradientEnabled ? "checked" : ""} />
+            X/R gradient
+          </label>
+          <label id="exp-rx-gradient-strength" title="Adjust the X/R gradient intensity.">
+            <span>Strength</span>
+            <input id="exp-rx-gradient-strength-input" type="range" min="${RX_GRADIENT_STRENGTH_MIN}" max="${RX_GRADIENT_STRENGTH_MAX}" step="10" value="${rxGradientStrength}" aria-label="X/R gradient strength" />
+            <output id="exp-rx-gradient-strength-value" for="exp-rx-gradient-strength-input">${rxGradientStrength}%</output>
+          </label>
+        ` : ""}
+        <button id="exp-btn" type="button" aria-label="${safeButtonLabel}">${safeButtonLabel}</button>
+        <label id="exp-fixed" title="When off, export uses current visible plot size.">
+          <input id="exp-fixed-size" type="checkbox" ${fixedExportSize ? "checked" : ""} />
+          Fixed size
+        </label>
+      </div>
+      <div id="exp-plot"></div>
+    </div>
+  `;
+  const fixedInput = document.getElementById("exp-fixed-size");
+  if (fixedInput) {
+    fixedInput.addEventListener("change", () => {
+      fixedExportSize = Boolean(fixedInput.checked);
+    });
+  }
+  const gradientInput = document.getElementById("exp-rx-gradient-input");
+  if (gradientInput) {
+    gradientInput.addEventListener("change", () => {
+      rxGradientEnabled = Boolean(gradientInput.checked);
+      publishRxGradientState(rxGradientStateKey, rxGradientEnabled, rxGradientStrength);
+      const plotCtx = parentPlotContext(cfg.plotIndex);
+      const controller = parentRoot()[RX_GRADIENT_CONTROLLER_GLOBAL];
+      if (plotCtx && controller && typeof controller.applyToPlot === "function") {
+        controller.applyToPlot(plotCtx.gd, rxGradientEnabled, rxGradientStrength);
+      }
+    });
+  }
+  const gradientStrengthInput = document.getElementById("exp-rx-gradient-strength-input");
+  const gradientStrengthValue = document.getElementById("exp-rx-gradient-strength-value");
+  if (gradientStrengthInput) {
+    gradientStrengthInput.addEventListener("input", () => {
+      rxGradientStrength = normalizeRxGradientStrength(gradientStrengthInput.value);
+      if (gradientStrengthValue) gradientStrengthValue.textContent = `${rxGradientStrength}%`;
+      publishRxGradientState(rxGradientStateKey, rxGradientEnabled, rxGradientStrength);
+      const plotCtx = parentPlotContext(cfg.plotIndex);
+      const controller = parentRoot()[RX_GRADIENT_CONTROLLER_GLOBAL];
+      if (plotCtx && controller && typeof controller.applyToPlot === "function") {
+        controller.applyToPlot(plotCtx.gd, rxGradientEnabled, rxGradientStrength);
+      }
+    });
+  }
+  const btn = document.getElementById("exp-btn");
+  if (btn) {
+    btn.addEventListener("click", async () => {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.textContent = "Exporting PNG...";
+      try {
+        await doExport();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = buttonLabel;
+      }
+    });
+  }
+  sendToStreamlit("streamlit:setFrameHeight", { height: 32 });
+}
+
+async function doExport() {
+  const cfg = exportArgs();
+
+  try {
+    const plotCtx = parentPlotContext(cfg.plotIndex);
+    if (!plotCtx) return;
+    const Plotly = plotCtx.Plotly;
+    const gd = plotCtx.gd;
+
+    if (cfg.rxGradientControl) {
+      rxGradientEnabled = readRxGradientState(cfg.stateKey);
+      rxGradientStrength = readRxGradientStrength(cfg.stateKey);
+      const controller = parentRoot()[RX_GRADIENT_CONTROLLER_GLOBAL];
+      if (controller && typeof controller.applyToPlot === "function") {
+        await controller.applyToPlot(gd, rxGradientEnabled, rxGradientStrength);
+      }
+    }
+
+    const r = gd.getBoundingClientRect();
+    const widthPx = fixedExportSize ? cfg.fixedWidth : Math.floor(r.width || 0);
+    if (!widthPx) return;
+
+    const legendFontSize = (
+      (gd && gd._fullLayout && gd._fullLayout.legend && gd._fullLayout.legend.font && gd._fullLayout.legend.font.size) ||
+      (gd && gd._fullLayout && gd._fullLayout.font && gd._fullLayout.font.size) ||
+      cfg.fallbackLegendFontSize
+    );
+    const legendRowH = Math.ceil(Number(legendFontSize) * cfg.rowHeightFactor);
+    const leftMarginPx = Math.max(
+      cfg.leftMarginBase,
+      Math.round(cfg.tickFontSize * cfg.leftMarginTickMult + cfg.axisTitleFontSize * cfg.leftMarginTitleMult),
+    );
+
+    const data2 = exportableData(gd);
+    const selectedLegendItems = selectedCaseLegendItemsForData(data2, cfg);
+    const legendItems = selectedLegendItems.length > 0 ? selectedLegendItems : legendItemsForData(data2, cfg.fallbackColor);
+
+    const usableW = Math.max(1, widthPx - leftMarginPx - cfg.rightMargin);
+    const maxTextW = measureMaxLegendTextWidth(legendItems, legendFontSize, cfg.legendFontFamily);
+
+    const sampleLinePx = Math.max(cfg.sampleLineMinPx, Math.round(cfg.sampleLineMult * legendFontSize));
+    const sampleGapPx = Math.max(cfg.sampleGapMinPx, Math.round(cfg.sampleGapMult * legendFontSize));
+    const textPadPx = Math.max(cfg.textPadMinPx, Math.round(cfg.textPadMult * legendFontSize));
+    const neededEntryPx = Math.ceil(sampleLinePx + sampleGapPx + maxTextW + textPadPx);
+    const entryPx = Math.max(1, Math.max(cfg.legendEntryWidth, neededEntryPx));
+
+    const cols = Math.max(1, Math.floor(usableW / entryPx));
+    const rows = Math.ceil(legendItems.length / cols);
+    const legendH = (rows * legendRowH) + cfg.legendPad + Math.ceil(cfg.tailFontMult * legendFontSize);
+    const newMarginB = cfg.bottomAxis + legendH;
+    const plotHeightPx = fixedExportSize ? cfg.fixedHeight : cfg.plotHeight;
+    const newHeight = plotHeightPx + cfg.topMargin + newMarginB;
+
+    const container = document.getElementById("exp-plot");
+    if (!container) return;
+    container.style.width = `${widthPx}px`;
+    container.style.height = `${newHeight}px`;
+
+    const baseLayout = Object.assign({}, gd.layout || {});
+    baseLayout.width = widthPx;
+    baseLayout.height = newHeight;
+    baseLayout.autosize = false;
+    baseLayout.margin = Object.assign({}, baseLayout.margin || {});
+    baseLayout.margin.t = cfg.topMargin;
+    baseLayout.margin.l = leftMarginPx;
+    baseLayout.margin.r = cfg.rightMargin;
+    baseLayout.margin.b = newMarginB;
+    baseLayout.showlegend = false;
+    if (cfg.rxGradientControl) {
+      const baseImages = baseImagesForRxPlot(gd);
+      baseLayout.images = rxGradientEnabled && gd.__fsRxGradientImage
+        ? baseImages.concat([gd.__fsRxGradientImage])
+        : baseImages;
+    }
+    if (Array.isArray(baseLayout.shapes)) {
+      baseLayout.shapes = baseLayout.shapes.filter((shape) => {
+        return !String(shape && shape.name ? shape.name : "").startsWith("__fs_rx_locator_");
+      });
+    }
+    if (cfg.selectedCaseLegend) {
+      removeExportOnlyControls(baseLayout);
+    }
+    for (const tr of data2) {
+      tr.showlegend = false;
+    }
+
+    const ann = Array.isArray(baseLayout.annotations) ? baseLayout.annotations.slice() : [];
+    const shp = Array.isArray(baseLayout.shapes) ? baseLayout.shapes.slice() : [];
+    const colW = usableW / cols;
+    const xPadPx = Math.max(0, Math.min(cfg.colPaddingMaxPx, Math.floor(colW * cfg.colPaddingFrac)));
+
+    for (let i = 0; i < legendItems.length; i++) {
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const x0 = (col * colW + xPadPx) / usableW;
+      const x1 = x0 + (sampleLinePx / usableW);
+      const y = -(cfg.bottomAxis + cfg.legendPad + (row + cfg.rowYOffset) * legendRowH) / Math.max(1, plotHeightPx);
+      shp.push({
+        type: "line",
+        xref: "paper",
+        yref: "paper",
+        x0, x1,
+        y0: y, y1: y,
+        line: { color: legendItems[i].color, width: 2 },
+      });
+      ann.push({
+        xref: "paper",
+        yref: "paper",
+        x: x1 + (sampleGapPx / usableW),
+        y,
+        xanchor: "left",
+        yanchor: "middle",
+        showarrow: false,
+        align: "left",
+        text: legendItems[i].name,
+        font: { size: legendFontSize, family: cfg.legendFontFamily, color: cfg.legendFontColor },
+      });
+    }
+
+    baseLayout.annotations = ann;
+    baseLayout.shapes = shp;
+
+    await Plotly.newPlot(container, data2, baseLayout, { displayModeBar: false, staticPlot: true });
+    const url = await Plotly.toImage(container, {
+      format: "png",
+      width: widthPx,
+      height: newHeight,
+      scale: fixedExportSize ? cfg.fixedScale : cfg.scale,
+    });
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = cfg.filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (e) {
+    debugWarn("doExport", e);
+  } finally {
+    resetExportContainer();
+  }
+}
+
+window.addEventListener("message", (event) => {
+  const data = event && event.data ? event.data : null;
+  if (!data || data.type !== "streamlit:render") return;
+  latestArgs = data.args || {};
+  render();
+});
+
+sendToStreamlit("streamlit:componentReady", { apiVersion: 1 });
+sendToStreamlit("streamlit:setFrameHeight", { height: 28 });
